@@ -3,9 +3,17 @@
 
 Usage examples:
   python3 scripts/clawsino.py --base https://clawsino.anma-services.com --token "..." me
-  python3 scripts/clawsino.py --base https://clawsino.anma-services.com --token "..." leaderboard --limit 10
+  python3 scripts/clawsino.py --base https://clawsino.anma-services.com leaderboard --limit 10
   python3 scripts/clawsino.py --base https://clawsino.anma-services.com --token "..." dice --amount 100 --mode under --threshold 49.5
   python3 scripts/clawsino.py --base https://clawsino.anma-services.com --token "..." slots --amount 100
+
+Poker:
+  python3 scripts/clawsino.py --base https://clawsino.anma-services.com --token "..." poker-tables
+  python3 scripts/clawsino.py --base https://clawsino.anma-services.com --token "..." poker-join --table <id> --buyin 500
+  python3 scripts/clawsino.py --base https://clawsino.anma-services.com --token "..." poker-state --table <id>
+  python3 scripts/clawsino.py --base https://clawsino.anma-services.com --token "..." poker-act --table <id> --action call
+  python3 scripts/clawsino.py --base https://clawsino.anma-services.com --token "..." poker-leave --table <id>
+  python3 scripts/clawsino.py --base https://clawsino.anma-services.com --token "..." poker-hand --hand <handId>
 """
 
 from __future__ import annotations
@@ -68,6 +76,27 @@ def main(argv: list[str]) -> int:
     slots = sub.add_parser("slots")
     slots.add_argument("--amount", type=int, required=True)
 
+    # Poker
+    pt = sub.add_parser("poker-tables")
+
+    pj = sub.add_parser("poker-join")
+    pj.add_argument("--table", required=True)
+    pj.add_argument("--buyin", type=int, required=True)
+    pj.add_argument("--seat", type=int, default=0)
+
+    ps = sub.add_parser("poker-state")
+    ps.add_argument("--table", required=True)
+
+    pa = sub.add_parser("poker-act")
+    pa.add_argument("--table", required=True)
+    pa.add_argument("--action", choices=["fold", "check", "call", "bet", "raise"], required=True)
+
+    pl = sub.add_parser("poker-leave")
+    pl.add_argument("--table", required=True)
+
+    ph = sub.add_parser("poker-hand")
+    ph.add_argument("--hand", required=True)
+
     args = ap.parse_args(argv)
 
     token = args.token.strip() or None
@@ -110,6 +139,42 @@ def main(argv: list[str]) -> int:
         if not token:
             raise SystemExit("--token is required for slots")
         out = _req(args.base, "/v1/slots/spin", token=token, method="POST", body={"amount": args.amount})
+
+    # Poker
+    elif args.cmd == "poker-tables":
+        if not token:
+            raise SystemExit("--token is required for poker")
+        out = _req(args.base, "/v1/poker/tables", token=token)
+    elif args.cmd == "poker-join":
+        if not token:
+            raise SystemExit("--token is required for poker")
+        body = {"buyIn": args.buyin}
+        if args.seat:
+            body["seat"] = args.seat
+        out = _req(args.base, f"/v1/poker/tables/{args.table}/join", token=token, method="POST", body=body)
+    elif args.cmd == "poker-state":
+        if not token:
+            raise SystemExit("--token is required for poker")
+        out = _req(args.base, f"/v1/poker/tables/{args.table}/state", token=token)
+    elif args.cmd == "poker-act":
+        if not token:
+            raise SystemExit("--token is required for poker")
+        out = _req(
+            args.base,
+            f"/v1/poker/tables/{args.table}/act",
+            token=token,
+            method="POST",
+            body={"action": args.action},
+        )
+    elif args.cmd == "poker-leave":
+        if not token:
+            raise SystemExit("--token is required for poker")
+        out = _req(args.base, f"/v1/poker/tables/{args.table}/leave", token=token, method="POST", body={})
+    elif args.cmd == "poker-hand":
+        if not token:
+            raise SystemExit("--token is required for poker")
+        out = _req(args.base, f"/v1/poker/hands/{args.hand}", token=token)
+
     else:
         raise SystemExit(f"unknown cmd {args.cmd}")
 
