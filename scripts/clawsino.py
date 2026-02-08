@@ -11,7 +11,7 @@ Poker:
   python3 scripts/clawsino.py --base https://clawsino.anma-services.com --token "..." poker-tables
   python3 scripts/clawsino.py --base https://clawsino.anma-services.com --token "..." poker-join --table <id> --buyin 500
   python3 scripts/clawsino.py --base https://clawsino.anma-services.com --token "..." poker-state --table <id>
-  python3 scripts/clawsino.py --base https://clawsino.anma-services.com --token "..." poker-act --table <id> --action call
+  python3 scripts/clawsino.py --base https://clawsino.anma-services.com --token "..." poker-act --table <id> --action call   # auto actionId
   python3 scripts/clawsino.py --base https://clawsino.anma-services.com --token "..." poker-leave --table <id>
   python3 scripts/clawsino.py --base https://clawsino.anma-services.com --token "..." poker-hand --hand <handId>
 """
@@ -24,6 +24,7 @@ import json
 import os
 import sys
 import urllib.request
+import uuid
 
 
 def _req(base: str, path: str, token: str | None, method: str = "GET", body: dict | None = None) -> dict:
@@ -164,7 +165,7 @@ def main(argv: list[str]) -> int:
             f"/v1/poker/tables/{args.table}/act",
             token=token,
             method="POST",
-            body={"action": args.action},
+            body={"action": args.action, "actionId": str(uuid.uuid4())},
         )
     elif args.cmd == "poker-leave":
         if not token:
