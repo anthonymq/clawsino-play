@@ -14,6 +14,10 @@ Poker:
   python3 scripts/clawsino.py --base https://clawsino.anma-services.com --token "..." poker-act --table <id> --action call   # auto actionId
   python3 scripts/clawsino.py --base https://clawsino.anma-services.com --token "..." poker-leave --table <id>
   python3 scripts/clawsino.py --base https://clawsino.anma-services.com --token "..." poker-hand --hand <handId>
+
+Agent auth (persists ed25519 keypairs + last session token in ~/.config/clawsino-play/store.json):
+  python3 scripts/clawsino.py agent-auth --handle pokerstar
+  python3 scripts/clawsino.py --agent pokerstar poker-tables
 """
 
 from __future__ import annotations
@@ -25,6 +29,9 @@ import os
 import sys
 import urllib.request
 import uuid
+
+from cryptography.hazmat.primitives.asymmetric import ed25519
+from cryptography.hazmat.primitives import serialization
 
 
 def _req(base: str, path: str, token: str | None, method: str = "GET", body: dict | None = None) -> dict:
@@ -47,10 +54,121 @@ def _req(base: str, path: str, token: str | None, method: str = "GET", body: dic
         raise SystemExit(f"HTTP {e.code} {url}: {txt}")
 
 
+def _store_path() -> str:
+    # Per-user store (safe default). Override with CLAWSINO_STORE_PATH.
+    p = os.environ.get("CLAWSINO_STORE_PATH", "")
+    if p.strip():
+        return p
+    home = os.path.expanduser("~")
+    return os.path.join(home, ".config", "clawsino-play", "store.json")
+
+
+def _load_store() -> dict:
+    p = _store_path()
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {"agents": {}, "devices": {}}
+
+
+def _save_store(store: dict) -> None:
+    p = _store_path()
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    tmp = p + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(store, f, indent=2, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp, p)
+
+
+def _b64(b: bytes) -> str:
+    return base64.b64encode(b).decode("ascii")
+
+
+def _b64d(s: str) -> bytes:
+    return base64.b64decode(s.encode("ascii"))
+
+
+def _ensure_agent_keypair(store: dict, handle: str) -> dict:
+    agents = store.setdefault("agents", {})
+    ent = agents.get(handle) or {}
+
+    if ent.get("publicKeyB64") and ent.get("privateKeyPkcs8B64"):
+        agents[handle] = ent
+        return ent
+
+    priv = ed25519.Ed25519PrivateKey.generate()
+    pub = priv.public_key()
+
+    priv_der = priv.private_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    pub_raw = pub.public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+
+    ent["publicKeyB64"] = _b64(pub_raw)
+    ent["privateKeyPkcs8B64"] = _b64(priv_der)
+    agents[handle] = ent
+    return ent
+
+
+def _agent_login(base: str, handle: str) -> dict:
+    """Get a play-scope session token for an agent, persisting the ed25519 keypair.
+
+    Identity = publicKey, so reusing the same stored keypair prevents creating new users.
+    """
+    store = _load_store()
+    ent = _ensure_agent_keypair(store, handle)
+    _save_store(store)
+
+    reg = _req(base, "/v1/agent/register", token=None, method="POST", body={"handle": handle})
+    msg = reg.get("messageToSign")
+    cid = reg.get("challengeId")
+    if not msg or not cid:
+        raise SystemExit(f"agent/register failed: {reg}")
+
+    priv = serialization.load_der_private_key(_b64d(ent["privateKeyPkcs8B64"]), password=None)
+    sig = priv.sign(msg.encode("utf-8"))
+
+    ver = _req(
+        base,
+        "/v1/agent/verify",
+        token=None,
+        method="POST",
+        body={
+            "challengeId": cid,
+            "publicKey": ent["publicKeyB64"],
+            "signature": _b64(sig),
+        },
+    )
+
+    # persist last token
+    store = _load_store()
+    ent = store.setdefault("agents", {}).get(handle) or ent
+    ent["lastSessionToken"] = ver.get("sessionToken", "")
+    ent["lastSessionExpiresAt"] = ver.get("expiresAt", "")
+    store["agents"][handle] = ent
+    _save_store(store)
+    return ver
+
+
+def _agent_token_from_store(handle: str) -> str | None:
+    store = _load_store()
+    ent = (store.get("agents") or {}).get(handle) or {}
+    tok = (ent.get("lastSessionToken") or "").strip()
+    return tok or None
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", default="https://clawsino.anma-services.com")
     ap.add_argument("--token", default="")
+    ap.add_argument("--agent", default="", help="Use stored agent identity (ed25519 keypair) by handle. Loads token from store.json")
 
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -63,6 +181,10 @@ def main(argv: list[str]) -> int:
     devs = sub.add_parser("device-start")
     devs.add_argument("--client-name", default="openclaw")
     devs.add_argument("--handle", default="openclaw-bot")
+
+    # Agent auth (ed25519 keypair persisted in store.json)
+    aa = sub.add_parser("agent-auth")
+    aa.add_argument("--handle", required=True)
 
     devp = sub.add_parser("device-poll")
     devp.add_argument("--device-code", required=True)
@@ -101,6 +223,8 @@ def main(argv: list[str]) -> int:
     args = ap.parse_args(argv)
 
     token = args.token.strip() or None
+    if not token and getattr(args, "agent", "").strip():
+        token = _agent_token_from_store(args.agent.strip())
 
     if args.cmd == "healthz":
         out = _req(args.base, "/healthz", token=None)
@@ -111,8 +235,17 @@ def main(argv: list[str]) -> int:
     elif args.cmd == "leaderboard":
         out = _req(args.base, f"/v1/leaderboard?limit={args.limit}", token=None)
     elif args.cmd == "device-start":
-        # Generate a pseudo-identity public key (32 random bytes). This is enough to create a unique user.
-        pub = base64.b64encode(os.urandom(32)).decode('ascii')
+        # Generate a pseudo-identity public key (32 random bytes) and persist it.
+        # This prevents creating a new user every time device-start is run.
+        store = _load_store()
+        devices = store.setdefault("devices", {})
+        key = args.handle.strip() or "default"
+        pub = (devices.get(key) or "").strip()
+        if not pub:
+            pub = base64.b64encode(os.urandom(32)).decode("ascii")
+            devices[key] = pub
+            _save_store(store)
+
         out = _req(
             args.base,
             "/v1/device/start",
@@ -121,6 +254,10 @@ def main(argv: list[str]) -> int:
             body={"publicKey": pub, "clientName": args.client_name, "requestedHandle": args.handle},
         )
         out["publicKey"] = pub
+        out["storePath"] = _store_path()
+    elif args.cmd == "agent-auth":
+        out = _agent_login(args.base, args.handle)
+        out["storePath"] = _store_path()
     elif args.cmd == "device-poll":
         out = _req(args.base, "/v1/device/poll", token=None, method="POST", body={"deviceCode": args.device_code})
     elif args.cmd == "dice":
